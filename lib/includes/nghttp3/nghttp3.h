@@ -1879,7 +1879,7 @@ typedef struct nghttp3_callbacks {
   /**
    * :member:`reset_stream` is a callback function which is invoked
    * when the library asks application to reset stream (by sending
-   * RESET_STREAM).  It is only used by server to reject a request.
+   * RESET_STREAM).
    */
   nghttp3_reset_stream reset_stream;
   /**
@@ -2100,8 +2100,8 @@ NGHTTP3_EXTERN int nghttp3_conn_add_ack_offset(nghttp3_conn *conn,
  * `nghttp3_conn_block_stream` tells the library that stream
  * identified by |stream_id| is blocked due to QUIC flow control.
  */
-NGHTTP3_EXTERN int nghttp3_conn_block_stream(nghttp3_conn *conn,
-                                             int64_t stream_id);
+NGHTTP3_EXTERN void nghttp3_conn_block_stream(nghttp3_conn *conn,
+                                              int64_t stream_id);
 
 /**
  * @function
@@ -2141,8 +2141,8 @@ NGHTTP3_EXTERN int nghttp3_conn_is_stream_writable(nghttp3_conn *conn,
  * prohibited.  This works like `nghttp3_conn_block_stream`, but it
  * cannot be unblocked by `nghttp3_conn_unblock_stream`.
  */
-NGHTTP3_EXTERN int nghttp3_conn_shutdown_stream_write(nghttp3_conn *conn,
-                                                      int64_t stream_id);
+NGHTTP3_EXTERN void nghttp3_conn_shutdown_stream_write(nghttp3_conn *conn,
+                                                       int64_t stream_id);
 
 /**
  * @function
@@ -2169,6 +2169,16 @@ NGHTTP3_EXTERN int nghttp3_conn_resume_stream(nghttp3_conn *conn,
  *
  * `nghttp3_conn_close_stream` closes stream identified by
  * |stream_id|.  |app_error_code| is the reason of the closure.
+ *
+ * This function returns 0 if it succeeds, or one of the following
+ * negative error codes:
+ *
+ * :macro:`NGHTTP3_ERR_STREAM_NOT_FOUND`
+ *     Stream not found.
+ * :macro:`NGHTTP3_ERR_H3_CLOSED_CRITICAL_STREAM`
+ *     A critical stream is closed.
+ * :macro:`NGHTTP3_ERR_CALLBACK_FAILURE`
+ *     User callback failed
  */
 NGHTTP3_EXTERN int nghttp3_conn_close_stream(nghttp3_conn *conn,
                                              int64_t stream_id,
@@ -2368,11 +2378,10 @@ NGHTTP3_EXTERN int nghttp3_conn_set_stream_user_data(nghttp3_conn *conn,
  *
  * `nghttp3_conn_get_frame_payload_left` returns the number of bytes
  * left to read current frame payload for a stream denoted by
- * |stream_id|.  If no such stream is found, it returns
- * :macro:`NGHTTP3_ERR_STREAM_NOT_FOUND`.
+ * |stream_id|.  If no such stream is found, it returns 0.
  */
-NGHTTP3_EXTERN int64_t nghttp3_conn_get_frame_payload_left(nghttp3_conn *conn,
-                                                           int64_t stream_id);
+NGHTTP3_EXTERN uint64_t nghttp3_conn_get_frame_payload_left(nghttp3_conn *conn,
+                                                            int64_t stream_id);
 
 /**
  * @macrosection

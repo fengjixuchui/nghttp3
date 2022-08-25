@@ -97,6 +97,7 @@ int main(void) {
                    test_nghttp3_conn_http_ignore_content_length) ||
       !CU_add_test(pSuite, "conn_http_record_request_method",
                    test_nghttp3_conn_http_record_request_method) ||
+      !CU_add_test(pSuite, "conn_http_error", test_nghttp3_conn_http_error) ||
       !CU_add_test(pSuite, "conn_qpack_blocked_stream",
                    test_nghttp3_conn_qpack_blocked_stream) ||
       !CU_add_test(pSuite, "conn_submit_response_read_blocked",
@@ -124,6 +125,8 @@ int main(void) {
       !CU_add_test(pSuite, "sf_parse_item", test_nghttp3_sf_parse_item) ||
       !CU_add_test(pSuite, "sf_parse_inner_list",
                    test_nghttp3_sf_parse_inner_list) ||
+      !CU_add_test(pSuite, "check_header_value",
+                   test_nghttp3_check_header_value) ||
       !CU_add_test(pSuite, "pri_to_uint8", test_nghttp3_pri_to_uint8)) {
     CU_cleanup_registry();
     return (int)CU_get_error();

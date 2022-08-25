@@ -477,7 +477,7 @@ void test_nghttp3_conn_submit_request(void) {
       MAKE_NV(":scheme", "https"),
       MAKE_NV(":method", "GET"),
   };
-  size_t len;
+  uint64_t len;
   size_t i;
   nghttp3_stream *stream;
   userdata ud;
@@ -679,8 +679,8 @@ void test_nghttp3_conn_http_request(void) {
       break;
     }
 
-    rv = nghttp3_conn_add_write_offset(cl, stream_id,
-                                       nghttp3_vec_len(vec, (size_t)sveccnt));
+    rv = nghttp3_conn_add_write_offset(
+        cl, stream_id, (size_t)nghttp3_vec_len(vec, (size_t)sveccnt));
 
     CU_ASSERT(0 == rv);
 
@@ -720,8 +720,8 @@ void test_nghttp3_conn_http_request(void) {
       break;
     }
 
-    rv = nghttp3_conn_add_write_offset(sv, stream_id,
-                                       nghttp3_vec_len(vec, (size_t)sveccnt));
+    rv = nghttp3_conn_add_write_offset(
+        sv, stream_id, (size_t)nghttp3_vec_len(vec, (size_t)sveccnt));
 
     CU_ASSERT(0 == rv);
 
@@ -786,7 +786,15 @@ static void check_http_header(const nghttp3_nv *nva, size_t nvlen, int request,
                                        /* fin = */ 0);
 
   if (want_lib_error) {
-    CU_ASSERT(want_lib_error == sconsumed);
+    if (want_lib_error == NGHTTP3_ERR_MALFORMED_HTTP_HEADER) {
+      CU_ASSERT((nghttp3_ssize)nghttp3_buf_len(&buf) == sconsumed);
+
+      stream = nghttp3_conn_find_stream(conn, 0);
+
+      CU_ASSERT(stream->flags & NGHTTP3_STREAM_FLAG_HTTP_ERROR);
+    } else {
+      CU_ASSERT(want_lib_error == sconsumed);
+    }
   } else {
     CU_ASSERT(sconsumed > 0);
   }
@@ -1417,7 +1425,9 @@ void test_nghttp3_conn_http_non_final_response(void) {
   nghttp3_conn_del(conn);
   nghttp3_qpack_encoder_free(&qenc);
 
-  /* non-finals followed by trailers */
+  /* non-finals followed by trailers; this trailer is treated as
+     another non-final or final header fields.  Since it does not
+     include mandatory header field, it is treated as error. */
   nghttp3_buf_wrap_init(&buf, rawbuf, sizeof(rawbuf));
   nghttp3_qpack_encoder_init(&qenc, 0, mem);
 
@@ -1440,7 +1450,11 @@ void test_nghttp3_conn_http_non_final_response(void) {
   sconsumed = nghttp3_conn_read_stream(conn, 0, buf.pos, nghttp3_buf_len(&buf),
                                        /* fin = */ 0);
 
-  CU_ASSERT(NGHTTP3_ERR_MALFORMED_HTTP_HEADER == sconsumed);
+  CU_ASSERT((nghttp3_ssize)nghttp3_buf_len(&buf) == sconsumed);
+
+  stream = nghttp3_conn_find_stream(conn, 0);
+
+  CU_ASSERT(stream->flags & NGHTTP3_STREAM_FLAG_HTTP_ERROR);
 
   nghttp3_conn_del(conn);
   nghttp3_qpack_encoder_free(&qenc);
@@ -1528,7 +1542,11 @@ void test_nghttp3_conn_http_trailers(void) {
   sconsumed = nghttp3_conn_read_stream(conn, 0, buf.pos, nghttp3_buf_len(&buf),
                                        /* fin = */ 0);
 
-  CU_ASSERT(NGHTTP3_ERR_MALFORMED_HTTP_HEADER == sconsumed);
+  CU_ASSERT((nghttp3_ssize)nghttp3_buf_len(&buf) == sconsumed);
+
+  stream = nghttp3_conn_find_stream(conn, 0);
+
+  CU_ASSERT(stream->flags & NGHTTP3_STREAM_FLAG_HTTP_ERROR);
 
   nghttp3_conn_del(conn);
   nghttp3_qpack_encoder_free(&qenc);
@@ -1669,7 +1687,11 @@ void test_nghttp3_conn_http_trailers(void) {
   sconsumed = nghttp3_conn_read_stream(conn, 0, buf.pos, nghttp3_buf_len(&buf),
                                        /* fin = */ 0);
 
-  CU_ASSERT(NGHTTP3_ERR_MALFORMED_HTTP_HEADER == sconsumed);
+  CU_ASSERT((nghttp3_ssize)nghttp3_buf_len(&buf) == sconsumed);
+
+  stream = nghttp3_conn_find_stream(conn, 0);
+
+  CU_ASSERT(stream->flags & NGHTTP3_STREAM_FLAG_HTTP_ERROR);
 
   nghttp3_conn_del(conn);
   nghttp3_qpack_encoder_free(&qenc);
@@ -1954,6 +1976,185 @@ void test_nghttp3_conn_http_record_request_method(void) {
   nghttp3_qpack_encoder_free(&qenc);
 }
 
+void test_nghttp3_conn_http_error(void) {
+  uint8_t rawbuf[4096];
+  nghttp3_buf buf, ebuf;
+  nghttp3_frame_headers fr;
+  nghttp3_conn *conn;
+  nghttp3_callbacks callbacks;
+  const nghttp3_mem *mem = nghttp3_mem_default();
+  nghttp3_ssize sconsumed;
+  nghttp3_qpack_encoder qenc;
+  nghttp3_settings settings;
+  const nghttp3_nv dupschemenv[] = {
+      MAKE_NV(":path", "/"),
+      MAKE_NV(":method", "GET"),
+      MAKE_NV(":authority", "localhost"),
+      MAKE_NV(":scheme", "https"),
+      MAKE_NV(":scheme", "https"),
+  };
+  const nghttp3_nv noschemenv[] = {
+      MAKE_NV(":path", "/"),
+      MAKE_NV(":method", "GET"),
+      MAKE_NV(":authority", "localhost"),
+  };
+  userdata ud;
+  nghttp3_stream *stream;
+
+  memset(&callbacks, 0, sizeof(callbacks));
+  callbacks.stop_sending = stop_sending;
+  callbacks.reset_stream = reset_stream;
+  nghttp3_settings_default(&settings);
+  settings.qpack_max_dtable_capacity = 4096;
+  settings.qpack_blocked_streams = 100;
+
+  /* duplicated :scheme */
+  nghttp3_buf_wrap_init(&buf, rawbuf, sizeof(rawbuf));
+  nghttp3_qpack_encoder_init(&qenc, 0, mem);
+  memset(&ud, 0, sizeof(ud));
+
+  fr.hd.type = NGHTTP3_FRAME_HEADERS;
+  fr.nva = (nghttp3_nv *)dupschemenv;
+  fr.nvlen = nghttp3_arraylen(dupschemenv);
+
+  nghttp3_write_frame_qpack(&buf, &qenc, 0, (nghttp3_frame *)&fr);
+
+  nghttp3_conn_server_new(&conn, &callbacks, &settings, mem, &ud);
+  nghttp3_conn_set_max_client_streams_bidi(conn, 1);
+
+  sconsumed = nghttp3_conn_read_stream(conn, 0, buf.pos, nghttp3_buf_len(&buf),
+                                       /* fin = */ 0);
+
+  CU_ASSERT((nghttp3_ssize)nghttp3_buf_len(&buf) == sconsumed);
+  CU_ASSERT(1 == ud.stop_sending_cb.ncalled);
+  CU_ASSERT(0 == ud.stop_sending_cb.stream_id);
+  CU_ASSERT(NGHTTP3_H3_MESSAGE_ERROR == ud.stop_sending_cb.app_error_code);
+  CU_ASSERT(1 == ud.reset_stream_cb.ncalled);
+  CU_ASSERT(0 == ud.reset_stream_cb.stream_id);
+  CU_ASSERT(NGHTTP3_H3_MESSAGE_ERROR == ud.reset_stream_cb.app_error_code);
+
+  stream = nghttp3_conn_find_stream(conn, 0);
+
+  CU_ASSERT(stream->flags & NGHTTP3_STREAM_FLAG_HTTP_ERROR);
+
+  /* After the error, everything is just discarded. */
+  sconsumed = nghttp3_conn_read_stream(conn, 0, buf.pos, nghttp3_buf_len(&buf),
+                                       /* fin = */ 0);
+
+  CU_ASSERT((nghttp3_ssize)nghttp3_buf_len(&buf) == sconsumed);
+  CU_ASSERT(1 == ud.stop_sending_cb.ncalled);
+  CU_ASSERT(1 == ud.reset_stream_cb.ncalled);
+
+  nghttp3_conn_del(conn);
+  nghttp3_qpack_encoder_free(&qenc);
+
+  /* without :scheme */
+  nghttp3_buf_wrap_init(&buf, rawbuf, sizeof(rawbuf));
+  nghttp3_qpack_encoder_init(&qenc, 0, mem);
+  memset(&ud, 0, sizeof(ud));
+
+  fr.hd.type = NGHTTP3_FRAME_HEADERS;
+  fr.nva = (nghttp3_nv *)noschemenv;
+  fr.nvlen = nghttp3_arraylen(noschemenv);
+
+  nghttp3_write_frame_qpack(&buf, &qenc, 0, (nghttp3_frame *)&fr);
+
+  nghttp3_conn_server_new(&conn, &callbacks, &settings, mem, &ud);
+  nghttp3_conn_set_max_client_streams_bidi(conn, 1);
+
+  sconsumed = nghttp3_conn_read_stream(conn, 0, buf.pos, nghttp3_buf_len(&buf),
+                                       /* fin = */ 0);
+
+  CU_ASSERT((nghttp3_ssize)nghttp3_buf_len(&buf) == sconsumed);
+  CU_ASSERT(1 == ud.stop_sending_cb.ncalled);
+  CU_ASSERT(0 == ud.stop_sending_cb.stream_id);
+  CU_ASSERT(NGHTTP3_H3_MESSAGE_ERROR == ud.stop_sending_cb.app_error_code);
+  CU_ASSERT(1 == ud.reset_stream_cb.ncalled);
+  CU_ASSERT(0 == ud.reset_stream_cb.stream_id);
+  CU_ASSERT(NGHTTP3_H3_MESSAGE_ERROR == ud.reset_stream_cb.app_error_code);
+
+  stream = nghttp3_conn_find_stream(conn, 0);
+
+  CU_ASSERT(stream->flags & NGHTTP3_STREAM_FLAG_HTTP_ERROR);
+
+  /* After the error, everything is just discarded. */
+  sconsumed = nghttp3_conn_read_stream(conn, 0, buf.pos, nghttp3_buf_len(&buf),
+                                       /* fin = */ 0);
+
+  CU_ASSERT((nghttp3_ssize)nghttp3_buf_len(&buf) == sconsumed);
+  CU_ASSERT(1 == ud.stop_sending_cb.ncalled);
+  CU_ASSERT(1 == ud.reset_stream_cb.ncalled);
+
+  nghttp3_conn_del(conn);
+  nghttp3_qpack_encoder_free(&qenc);
+
+  /* error on blocked stream */
+  nghttp3_buf_wrap_init(&buf, rawbuf, sizeof(rawbuf));
+  nghttp3_qpack_encoder_init(&qenc, settings.qpack_max_dtable_capacity, mem);
+  nghttp3_qpack_encoder_set_max_blocked_streams(&qenc,
+                                                settings.qpack_blocked_streams);
+  nghttp3_qpack_encoder_set_max_dtable_capacity(
+      &qenc, settings.qpack_max_dtable_capacity);
+  memset(&ud, 0, sizeof(ud));
+
+  nghttp3_buf_init(&ebuf);
+
+  fr.hd.type = NGHTTP3_FRAME_HEADERS;
+  fr.nva = (nghttp3_nv *)noschemenv;
+  fr.nvlen = nghttp3_arraylen(noschemenv);
+
+  nghttp3_write_frame_qpack_dyn(&buf, &ebuf, &qenc, 0, (nghttp3_frame *)&fr);
+
+  nghttp3_conn_server_new(&conn, &callbacks, &settings, mem, &ud);
+  nghttp3_conn_set_max_client_streams_bidi(conn, 1);
+
+  sconsumed = nghttp3_conn_read_stream(conn, 0, buf.pos, nghttp3_buf_len(&buf),
+                                       /* fin = */ 0);
+
+  CU_ASSERT(sconsumed > 0);
+  CU_ASSERT((nghttp3_ssize)nghttp3_buf_len(&buf) != sconsumed);
+  CU_ASSERT(0 == ud.stop_sending_cb.ncalled);
+  CU_ASSERT(0 == ud.reset_stream_cb.ncalled);
+
+  stream = nghttp3_conn_find_stream(conn, 0);
+
+  CU_ASSERT(!(stream->flags & NGHTTP3_STREAM_FLAG_HTTP_ERROR));
+  CU_ASSERT(0 != nghttp3_ringbuf_len(&stream->inq));
+
+  nghttp3_buf_reset(&buf);
+  buf.last = nghttp3_put_varint(buf.last, NGHTTP3_STREAM_TYPE_QPACK_ENCODER);
+
+  sconsumed = nghttp3_conn_read_stream(conn, 7, buf.pos, nghttp3_buf_len(&buf),
+                                       /* fin = */ 0);
+
+  CU_ASSERT((nghttp3_ssize)nghttp3_buf_len(&buf) == sconsumed);
+
+  sconsumed = nghttp3_conn_read_stream(conn, 7, ebuf.pos,
+                                       nghttp3_buf_len(&ebuf), /* fin = */ 0);
+
+  CU_ASSERT((nghttp3_ssize)nghttp3_buf_len(&ebuf) == sconsumed);
+  CU_ASSERT(stream->flags & NGHTTP3_STREAM_FLAG_HTTP_ERROR);
+  CU_ASSERT(0 == nghttp3_ringbuf_len(&stream->inq));
+  CU_ASSERT(1 == ud.stop_sending_cb.ncalled);
+  CU_ASSERT(0 == ud.stop_sending_cb.stream_id);
+  CU_ASSERT(NGHTTP3_H3_MESSAGE_ERROR == ud.stop_sending_cb.app_error_code);
+  CU_ASSERT(1 == ud.reset_stream_cb.ncalled);
+  CU_ASSERT(0 == ud.reset_stream_cb.stream_id);
+  CU_ASSERT(NGHTTP3_H3_MESSAGE_ERROR == ud.reset_stream_cb.app_error_code);
+
+  /* After the error, everything is just discarded. */
+  sconsumed = nghttp3_conn_read_stream(conn, 0, buf.pos, nghttp3_buf_len(&buf),
+                                       /* fin = */ 0);
+
+  CU_ASSERT((nghttp3_ssize)nghttp3_buf_len(&buf) == sconsumed);
+  CU_ASSERT(1 == ud.stop_sending_cb.ncalled);
+  CU_ASSERT(1 == ud.reset_stream_cb.ncalled);
+
+  nghttp3_buf_free(&ebuf, mem);
+  nghttp3_conn_del(conn);
+  nghttp3_qpack_encoder_free(&qenc);
+}
+
 void test_nghttp3_conn_qpack_blocked_stream(void) {
   const nghttp3_mem *mem = nghttp3_mem_default();
   nghttp3_conn *conn;
@@ -2147,8 +2348,8 @@ void test_nghttp3_conn_just_fin(void) {
       break;
     }
 
-    rv = nghttp3_conn_add_write_offset(conn, stream_id,
-                                       nghttp3_vec_len(vec, (size_t)sveccnt));
+    rv = nghttp3_conn_add_write_offset(
+        conn, stream_id, (size_t)nghttp3_vec_len(vec, (size_t)sveccnt));
 
     CU_ASSERT(0 == rv);
   }
@@ -2167,8 +2368,8 @@ void test_nghttp3_conn_just_fin(void) {
   CU_ASSERT(0 == stream_id);
   CU_ASSERT(1 == fin);
 
-  rv = nghttp3_conn_add_write_offset(conn, stream_id,
-                                     nghttp3_vec_len(vec, (size_t)sveccnt));
+  rv = nghttp3_conn_add_write_offset(
+      conn, stream_id, (size_t)nghttp3_vec_len(vec, (size_t)sveccnt));
 
   CU_ASSERT(0 == rv);
 
@@ -2188,8 +2389,8 @@ void test_nghttp3_conn_just_fin(void) {
   CU_ASSERT(4 == stream_id);
   CU_ASSERT(0 == fin);
 
-  rv = nghttp3_conn_add_write_offset(conn, stream_id,
-                                     nghttp3_vec_len(vec, (size_t)sveccnt));
+  rv = nghttp3_conn_add_write_offset(
+      conn, stream_id, (size_t)nghttp3_vec_len(vec, (size_t)sveccnt));
 
   CU_ASSERT(0 == rv);
 
@@ -2203,8 +2404,8 @@ void test_nghttp3_conn_just_fin(void) {
   CU_ASSERT(4 == stream_id);
   CU_ASSERT(1 == fin);
 
-  rv = nghttp3_conn_add_write_offset(conn, stream_id,
-                                     nghttp3_vec_len(vec, (size_t)sveccnt));
+  rv = nghttp3_conn_add_write_offset(
+      conn, stream_id, (size_t)nghttp3_vec_len(vec, (size_t)sveccnt));
 
   CU_ASSERT(0 == rv);
 
